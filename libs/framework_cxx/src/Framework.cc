@@ -301,9 +301,9 @@ public:
         return fwUUID;
     }
 
-    celix::BundleContext& frameworkContext() const {
+    std::shared_ptr<celix::BundleContext> frameworkContext() const {
         std::lock_guard<std::mutex> lck(bundles.mutex);
-        return *bundles.entries.at(celix::FRAMEWORK_BUNDLE_ID)->context();
+        return bundles.entries.at(celix::FRAMEWORK_BUNDLE_ID)->context();
     }
 
     bool startFramework() {
@@ -447,7 +447,7 @@ std::string celix::Framework::uuid() const {
     return pimpl->uuid();
 }
 
-celix::BundleContext& celix::Framework::context() const {
+std::shared_ptr<celix::BundleContext> celix::Framework::context() const {
     return pimpl->frameworkContext();
 }
 

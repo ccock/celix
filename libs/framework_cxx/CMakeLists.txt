@@ -27,6 +27,7 @@ add_library(celix_framework_cxx SHARED
         src/Framework.cc
         src/BundleContext.cc
         src/Bundle.cc
+        src/ComponentManager.cc
 )
 target_include_directories(celix_framework_cxx PRIVATE src)
 target_include_directories(celix_framework_cxx PUBLIC include)

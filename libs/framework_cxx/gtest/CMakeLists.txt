@@ -18,6 +18,7 @@
 set(SOURCES
         src/main.cc
         src/Framework_tests.cc
+        src/ComponentManager_tests.cc
 )
 add_executable(celix_framework_cxx_tests ${SOURCES})
 target_link_libraries(celix_framework_cxx_tests PRIVATE gtest celix_framework_cxx glog::glog)

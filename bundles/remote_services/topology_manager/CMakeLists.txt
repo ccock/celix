@@ -41,7 +41,7 @@ if (RSA_TOPOLOGY_MANAGER)
         include_directories(${CPPUTEST_INCLUDE_DIR})
         include_directories(${CPPUTEST_EXT_INCLUDE_DIR})
         add_subdirectory(tms_tst)
-   endif (ENABLE_TESTING)
+   endif ()
 
     install_celix_bundle(rsa_topology_manager EXPORT celix COMPONENT rsa)
     #Setup target aliases to match external usage

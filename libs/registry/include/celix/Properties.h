@@ -29,33 +29,53 @@ namespace celix {
 
     inline const std::string& getProperty(const Properties& props, const std::string &key, const std::string &defaultValue) noexcept {
         auto it = props.find(key);
-        if (it != props.end()) {
-            return props.at(key);
-        } else {
-            return defaultValue;
-        }
+        return it != props.end() ? it->second : defaultValue;
     }
 
-    inline int getProperty(const Properties& props, const std::string &key, int defaultValue)  noexcept {
-        std::string val = getProperty(props, key, std::to_string(defaultValue));
-        return std::stoi(val, nullptr, 10);
+    inline long getPropertyAsLong(const Properties& props, const std::string &key, long defaultValue) noexcept {
+        const std::string &strVal = getProperty(props, key, std::to_string(defaultValue));
+        char *endptr[1];
+        long lval = strtol(strVal.c_str(), endptr, 10);
+        return strVal.c_str() == *endptr ? defaultValue : lval;
     }
 
-    inline unsigned int getProperty(const Properties& props, const std::string &key, unsigned int defaultValue) noexcept {
-        std::string val = getProperty(props, key, std::to_string(defaultValue));
-        return static_cast<unsigned  int>(std::stoul(val, nullptr, 10)); //NOTE no std::stou ??
+    inline unsigned long getPropertyAsUnsignedLong(const Properties& props, const std::string &key, unsigned long defaultValue) noexcept {
+        const std::string &strVal = getProperty(props, key, std::to_string(defaultValue));
+        char *endptr[1];
+        unsigned long lval = strtoul(strVal.c_str(), endptr, 10);
+        return strVal.c_str() == *endptr ? defaultValue : lval;
     }
 
-    inline long getProperty(const Properties& props, const std::string &key, long defaultValue) noexcept {
-        std::string val = getProperty(props, key, std::to_string(defaultValue));
-        return std::stol(val, nullptr, 10);
+    inline int getPropertyAsInt(const Properties& props, const std::string &key, int defaultValue) noexcept {
+        long def = defaultValue;
+        long r = getPropertyAsLong(props, key, def);
+        return (int)r;
     }
 
-    inline unsigned int getProperty(const Properties& props, const std::string &key, unsigned long defaultValue) noexcept {
-        std::string val = getProperty(props, key, std::to_string(defaultValue));
-        return std::stoul(val, nullptr, 10);
+    inline unsigned int getPropertyAsUnsignedInt(const Properties& props, const std::string &key, unsigned int defaultValue) noexcept {
+        unsigned long def = defaultValue;
+        unsigned long r = getPropertyAsUnsignedLong(props, key, def);
+        return (unsigned int)r;
     }
 
+    inline bool getPropertyAsBool(const Properties& props, const std::string &key, bool defaultValue) noexcept {
+        const std::string &strVal = getProperty(props, key, std::to_string(defaultValue));
+        return strVal == "true" || strVal == "TRUE";
+    }
+
+    inline double getPropertyAsDouble(const Properties& props, const std::string &key, double defaultValue) noexcept {
+        const std::string &strVal = getProperty(props, key, std::to_string(defaultValue));
+        char *endptr[1];
+        double dval = strtod(strVal.c_str(), endptr);
+        return strVal.c_str() == *endptr ? defaultValue : dval;
+    }
+
+    inline float getPropertyAsFloat(const Properties& props, const std::string &key, float defaultValue) noexcept {
+        const std::string &strVal = getProperty(props, key, std::to_string(defaultValue));
+        char *endptr[1];
+        float fval = strtof(strVal.c_str(), endptr);
+        return strVal.c_str() == *endptr ? defaultValue : fval;
+    }
 
     celix::Properties loadProperties(const std::string &path);
     celix::Properties loadProperties(std::istream &stream);

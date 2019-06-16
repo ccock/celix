@@ -67,7 +67,7 @@ namespace {
                  celix::Properties &&_props) :
                 owner{std::move(_owner)}, svcId{_svcId}, svcName{std::move(_svcName)},
                 props{std::forward<celix::Properties>(_props)},
-                ranking{celix::getProperty(props, celix::SERVICE_RANKING, 0L)},
+                ranking{celix::getPropertyAsLong(props, celix::SERVICE_RANKING, 0L)},
                 svc{_svc}, svcFactory{_svcFac} {}
 
         SvcEntry(SvcEntry &&rhs) = delete;

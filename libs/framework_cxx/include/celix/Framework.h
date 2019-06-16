@@ -88,7 +88,7 @@ namespace celix {
         std::string cacheDir() const;
         std::string uuid() const;
 
-        celix::BundleContext& context() const;
+        std::shared_ptr<celix::BundleContext> context() const;
 
         //TODO trackBundles
 
