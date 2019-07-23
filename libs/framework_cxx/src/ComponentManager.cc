@@ -19,10 +19,16 @@
 
 
 #include <iostream>
+#include <celix/ComponentManager.h>
+
 
 #include "celix/ComponentManager.h"
 
-celix::GenericServiceDependency::GenericServiceDependency(std::shared_ptr<celix::BundleContext> _ctx) : ctx{_ctx} {}
+celix::GenericServiceDependency::GenericServiceDependency(
+        std::shared_ptr<celix::BundleContext> _ctx,
+        std::function<void()> _stateChangedCallback,
+        std::function<void()> _enable,
+        std::function<void()> _disable) : ctx{_ctx}, stateChangedCallback{std::move(_stateChangedCallback)}, enable{std::move(_enable)}, disable{std::move(_disable)} {}
 
 
 bool celix::GenericServiceDependency::isResolved() const {
@@ -49,6 +55,14 @@ const std::string &celix::GenericServiceDependency::getFilter() const {
     return filter;
 }
 
+void celix::GenericServiceDependency::setEnable(bool e) {
+    if (e) {
+        enable();
+    } else {
+        disable();
+    }
+}
+
 celix::ComponentState celix::GenericComponentManager::getState() const {
     std::lock_guard<std::mutex> lck{mutex};
     return state;
@@ -62,11 +76,11 @@ bool celix::GenericComponentManager::isEnabled() const  {
 
 bool celix::GenericComponentManager::isResolved() const {
     std::lock_guard<std::mutex> lck{mutex};
-//    for (auto &pair : serviceDependencies) {
-//        if (!pair->second.isResolved()) {
-//            return false;
-//        }
-//    }
+    for (auto &pair : serviceDependencies) {
+        if (!pair.second->isResolved()) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -78,6 +92,9 @@ void celix::GenericComponentManager::removeServiceDependency(long serviceDepende
 void celix::GenericComponentManager::setEnabled(bool e) {
     std::lock_guard<std::mutex> lck{mutex};
     enabled = e;
+    for (auto &pair : serviceDependencies) {
+        pair.second->setEnable(e);
+    }
 }
 
 void celix::GenericComponentManager::updateState() {
@@ -89,7 +106,7 @@ void celix::GenericComponentManager::updateState() {
 
     bool allDependenciesResolved = true;
     for (auto &pair : serviceDependencies) {
-        if (!pair.second.isResolved()) {
+        if (!pair.second->isResolved()) {
             allDependenciesResolved = false;
             break;
         }

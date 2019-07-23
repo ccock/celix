@@ -53,9 +53,16 @@ TEST_F(ComponentManagerTest, AddSvcDep) {
     class ISvc {};
 
     celix::ComponentManager<Cmp> cmpMng{ctx, std::make_shared<Cmp>()};
-    cmpMng.addServiceDependency(); //TODO
+    cmpMng.addServiceDependency<ISvc>()
+            .setRequired(true);
     cmpMng.enable();
     EXPECT_TRUE(cmpMng.isEnabled());
 
+    //dep not available -> cmp manager not resolved
+    EXPECT_FALSE(cmpMng.isResolved());
 
+
+    auto svcReg = ctx->registerService(std::make_shared<ISvc>());
+    //dep available -> cmp manager resolved
+    EXPECT_TRUE(cmpMng.isResolved());
 }

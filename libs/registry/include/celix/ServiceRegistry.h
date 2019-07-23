@@ -601,7 +601,7 @@ inline celix::ServiceTracker celix::ServiceRegistry::trackServices(std::string s
         };
     }
 
-    return trackAnyServices(std::move(svcName), std::move(opts), requester);
+    return trackAnyServices(std::move(svcName), std::move(opts), std::move(requester));
 }
 
 #endif //CXX_CELIX_SERVICEREGISTRY_H
