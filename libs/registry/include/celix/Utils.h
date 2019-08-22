@@ -34,7 +34,7 @@ namespace impl {
 namespace {
 
     template<typename INTERFACE_TYPENAME>
-    std::string typeName() {
+    std::string typeNameInternal() {
         static const std::string templateStr = "INTERFACE_TYPENAME = ";
         std::string pretty = __PRETTY_FUNCTION__;
         return celix::impl::typeNameFromPrettyFunction(templateStr, __PRETTY_FUNCTION__);
@@ -42,26 +42,34 @@ namespace {
 
     template<typename Arg>
     std::string argName() {
-        return typeName<Arg>(); //terminal;
+        return typeNameInternal<Arg>(); //terminal;
     }
 
     template<typename Arg1, typename Arg2, typename... Args>
     std::string argName() {
-        return typeName<Arg1>() + ", " + argName<Arg2, Args...>();
+        return typeNameInternal<Arg1>() + ", " + argName<Arg2, Args...>();
     }
 
     template<typename R>
     std::string functionName() {
-        return "std::function<" + typeName<R>() + "()>";
+        return "std::function<" + typeNameInternal<R>() + "()>";
     }
 
     template<typename R, typename Arg1, typename... Args>
     std::string functionName() {
-        return "std::function<" + typeName<R>() + "("  + argName<Arg1, Args...>() + ")>";
+        return "std::function<" + typeNameInternal<R>() + "("  + argName<Arg1, Args...>() + ")>";
     }
 };
 
 namespace celix {
+
+    /**
+     * Returns the type name of the provided template T
+     */
+    template<typename T>
+    std::string typeName() {
+        return typeNameInternal<T>();
+    }
 
     /* TODO
     template<typename I>
@@ -80,6 +88,7 @@ namespace celix {
         celix::impl::assertIsNotFunctionService(svcName);
         return svcName;
     }
+
 
     //TODO resolve FQN for Function Service.
 

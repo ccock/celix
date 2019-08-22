@@ -44,6 +44,11 @@ TEST_F(ComponentManagerTest, CreateDestroy) {
 
     cmpMng.enable();
     EXPECT_TRUE(cmpMng.isEnabled());
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Started);
+
+    cmpMng.disable();
+    EXPECT_FALSE(cmpMng.isEnabled());
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Disabled);
 }
 
 TEST_F(ComponentManagerTest, AddSvcDep) {
@@ -57,6 +62,8 @@ TEST_F(ComponentManagerTest, AddSvcDep) {
             .setRequired(true);
     cmpMng.enable();
     EXPECT_TRUE(cmpMng.isEnabled());
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Uninitialized);
+
 
     //dep not available -> cmp manager not resolved
     EXPECT_FALSE(cmpMng.isResolved());
@@ -64,5 +71,42 @@ TEST_F(ComponentManagerTest, AddSvcDep) {
 
     auto svcReg = ctx->registerService(std::make_shared<ISvc>());
     //dep available -> cmp manager resolved
+    EXPECT_TRUE(cmpMng.isResolved());
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Started);
+
+    cmpMng.disable();
+    //cmp disabled -> not resolved
+    EXPECT_FALSE(cmpMng.isResolved());
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Disabled);
+
+    //dmp enabled & svc available -> resolved.
+    cmpMng.enable();
+    EXPECT_TRUE(cmpMng.isResolved());
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Started);
+
+    svcReg.unregister();
+    EXPECT_EQ(cmpMng.getState(), celix::ComponentState::Initialized);
+    //dep unregisted -> state is Initialized
+}
+
+TEST_F(ComponentManagerTest, AddAndRemoveSvcDep) {
+    auto ctx = framework().context();
+
+    class Cmp {};
+    class ISvc {};
+    std::string svcDepUuid;
+
+    celix::ComponentManager<Cmp> cmpMng{ctx, std::make_shared<Cmp>()};
+    cmpMng.addServiceDependency<ISvc>()
+            .setRequired(true)
+            .extractUUID(svcDepUuid);
+    cmpMng.enable();
+    EXPECT_TRUE(cmpMng.isEnabled());
+
+    //dep not available -> cmp manager not resolved
+    EXPECT_FALSE(cmpMng.isResolved());
+
+    cmpMng.removeServiceDependency(svcDepUuid);
+    //dep removed -> cmp manager resolved
     EXPECT_TRUE(cmpMng.isResolved());
 }

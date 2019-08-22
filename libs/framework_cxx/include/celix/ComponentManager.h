@@ -22,7 +22,9 @@
 
 #include <memory>
 #include <unordered_map>
+#include <queue>
 
+#include "celix/Utils.h"
 #include "celix/BundleContext.h"
 
 namespace celix {
@@ -45,29 +47,41 @@ namespace celix {
         ComponentState getState() const;
         bool isEnabled() const;
         bool isResolved() const;
+        std::string getName() const;
+        std::string getUUD() const;
 
         //TODO make friend of SvcDep
         void updateState();
-    protected:
-        GenericComponentManager(std::shared_ptr<BundleContext> _ctx) : ctx{std::move(_ctx)} {};
 
-        void removeServiceDependency(long serviceDependencyId);
+        void removeServiceDependency(const std::string& serviceDependencyUUID);
+    protected:
+        GenericComponentManager(std::shared_ptr<BundleContext> _ctx, const std::string &_name);
+
         void setEnabled(bool enable);
 
-
         /**** Fields ****/
-        std::shared_ptr<BundleContext> ctx;
+        const std::shared_ptr<BundleContext> ctx;
+        const std::string name;
+        const std::string uuid;
 
-        mutable std::mutex mutex{}; //protects below
+        std::mutex callbacksMutex{}; //protects below std::functions
+        std::function<void()> init{[]{/*nop*/}};
+        std::function<void()> start{[]{/*nop*/}};
+        std::function<void()> stop{[]{/*nop*/}};
+        std::function<void()> deinit{[]{/*nop*/}};
+
+        std::mutex serviceDependenciesMutex{};
+        std::unordered_map<std::string,std::shared_ptr<GenericServiceDependency>> serviceDependencies{}; //key = dep uuid
+    private:
+        void setState(ComponentState state);
+        void setInitialized(bool initialized);
+        void transition();
+
+        mutable std::mutex stateMutex{}; //protects below
         ComponentState state = ComponentState::Disabled;
         bool enabled = false;
-        std::function<void()> init{};
-        std::function<void()> start{};
-        std::function<void()> stop{};
-        std::function<void()> deinit{};
-
-        long nextServiceDependencyId = 1L;
-        std::unordered_map<long,std::unique_ptr<GenericServiceDependency>> serviceDependencies{};
+        bool initialized = false;
+        std::queue<std::pair<ComponentState,ComponentState>> transitionQueue{};
     };
 
     template<typename T>
@@ -75,7 +89,7 @@ namespace celix {
     public:
         using ComponentType = T;
 
-        ComponentManager(std::shared_ptr<BundleContext> ctx, std::shared_ptr<T> cmpInstance);
+        ComponentManager(std::shared_ptr<BundleContext> ctx, std::shared_ptr<T> cmpInstance, const std::string &name = celix::typeName<T>());
         ~ComponentManager() override = default;
 
         ComponentManager<T>& enable();
@@ -91,6 +105,11 @@ namespace celix {
 
         template<typename I>
         ServiceDependency<T,I>& addServiceDependency();
+
+        template<typename I>
+        ServiceDependency<T,I>* findServiceDependency(const std::string& serviceDependencyUUID);
+
+        ComponentManager<T>& extractUUID(std::string& out);
 //
 //        template<typename F>
 //        ServiceDependency<T,F>& addFunctionServiceDependency(const std::string &functionName);
@@ -112,26 +131,25 @@ namespace celix {
         Cardinality getCardinality() const;
         bool getRequired() const;
         const std::string& getFilter() const;
-        void setEnable(bool enable);
+        std::string getUUD();
 
+        bool isEnabled();
+        virtual void setEnabled(bool e) = 0;
     protected:
         GenericServiceDependency(
                 std::shared_ptr<BundleContext> ctx,
-                std::function<void()> stateChangedCallback,
-                std::function<void()> enable,
-                std::function<void()> disable);
+                std::function<void()> stateChangedCallback);
 
         //Fields
-        std::shared_ptr<BundleContext> ctx;
+        const std::shared_ptr<BundleContext> ctx;
         const std::function<void()> stateChangedCallback;
-        const std::function<void()> enable;
-        std::function<void()> disable;
+        const std::string uuid;
 
         mutable std::mutex mutex{}; //protects below
         bool required = false;
         std::string filter{};
         Cardinality cardinality = Cardinality::One;
-        std::vector<ServiceTracker> tracker{}; //max 1
+        std::vector<ServiceTracker> tracker{}; //max 1 (1 == enabled / 0 = disabled
     };
 
     template<typename T, typename I>
@@ -157,9 +175,12 @@ namespace celix {
                 std::function<void(std::shared_ptr<I>, const celix::Properties &props, const celix::IResourceBundle &owner)> rem,
                 std::function<void(std::vector<std::tuple<std::shared_ptr<I>, const celix::Properties*, const celix::IResourceBundle *>> rankedServices)> update);
 
+        ServiceDependency<T,I>& extractUUID(std::string& out);
         ServiceDependency<T,I>& enable();
         ServiceDependency<T,I>& disable();
-        bool isResolved();
+
+        void setEnabled(bool e) override;
+
     private:
         const std::function<std::shared_ptr<T>()> getCmpInstance;
 
@@ -171,6 +192,8 @@ namespace celix {
     };
 }
 
+std::ostream& operator<< (std::ostream& out, celix::ComponentState state);
+
 
 
 /**************************** IMPLEMENTATION *************************************************************************/
@@ -178,17 +201,19 @@ namespace celix {
 template<typename T>
 celix::ComponentManager<T>::ComponentManager(
         std::shared_ptr<BundleContext> ctx,
-        std::shared_ptr<T> cmpInstance) : GenericComponentManager{ctx}, inst{std::move(cmpInstance)} {}
+        std::shared_ptr<T> cmpInstance,
+        const std::string &name) : GenericComponentManager{ctx, name}, inst{std::move(cmpInstance)} {
+}
 
 template<typename T>
 celix::ComponentManager<T>& celix::ComponentManager<T>::enable() {
-    this->setEnabled(true);
+    setEnabled(true);
     return *this;
 }
 
 template<typename T>
 celix::ComponentManager<T>& celix::ComponentManager<T>::disable() {
-    this->setEnabled(false);
+    setEnabled(false);
     return *this;
 }
 
@@ -198,7 +223,7 @@ celix::ComponentManager<T>& celix::ComponentManager<T>::setCallbacks(
         void (T::*memberStart)(),
         void (T::*memberStop)(),
         void (T::*memberDeinit)()) {
-    std::lock_guard<std::mutex> lck{mutex};
+    std::lock_guard<std::mutex> lck{callbacksMutex};
     init = [this, memberInit]() {
         if (memberInit) {
             (this->instance()->*memberInit)();
@@ -227,17 +252,28 @@ std::shared_ptr<T> celix::ComponentManager<T>::instance() {
     return inst;
 }
 
+template<typename T>
+celix::ComponentManager<T>& celix::ComponentManager<T>::extractUUID(std::string &out) {
+    out = uuid;
+    return *this;
+}
 
 template<typename T>
 template<typename I>
 celix::ServiceDependency<T,I>& celix::ComponentManager<T>::addServiceDependency() {
-    auto *dep = new celix::ServiceDependency<T,I>{ctx, []{/*TODO*/}, [this]{return instance();}};
-    std::lock_guard<std::mutex> lck{mutex};
-    serviceDependencies[nextServiceDependencyId++] = std::unique_ptr<GenericServiceDependency>{dep};
+    auto *dep = new celix::ServiceDependency<T,I>{ctx, [this]{updateState();}, [this]{return instance();}};
+    std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
+    serviceDependencies[dep->getUUD()] = std::unique_ptr<GenericServiceDependency>{dep};
     return *dep;
 }
 
-
+template<typename T>
+template<typename I>
+celix::ServiceDependency<T,I>* celix::ComponentManager<T>::findServiceDependency(const std::string& serviceDependencyUUID) {
+    std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
+    auto it = serviceDependencies.find(serviceDependencyUUID);
+    return it != serviceDependencies.end() ? nullptr : it->second.get();
+}
 
 
 
@@ -248,12 +284,14 @@ template<typename T, typename I>
 celix::ServiceDependency<T,I>::ServiceDependency(
         std::shared_ptr<celix::BundleContext> _ctx,
         std::function<void()> _stateChangedCallback,
-        std::function<std::shared_ptr<T>()> _getCmpInstance) : GenericServiceDependency{_ctx, _stateChangedCallback, [this]{enable();}, [this]{disable();}}, getCmpInstance{_getCmpInstance} {};
+        std::function<std::shared_ptr<T>()> _getCmpInstance) : GenericServiceDependency{std::move(_ctx), std::move(_stateChangedCallback)}, getCmpInstance{_getCmpInstance} {};
 
 template<typename T, typename I>
-celix::ServiceDependency<T,I>& celix::ServiceDependency<T,I>::enable() {
-    std::lock_guard<std::mutex> lck{mutex};
-    if (tracker.size() == 0) { //disabled
+void celix::ServiceDependency<T,I>::setEnabled(bool enable) {
+    bool currentlyEnabled = isEnabled();
+    std::vector<ServiceTracker> newTracker{};
+    if (enable && !currentlyEnabled) {
+        //enable
         ServiceTrackerOptions<I> opts{};
         opts.filter = this->filter;
         opts.setWithOwner = set;
@@ -266,15 +304,28 @@ celix::ServiceDependency<T,I>& celix::ServiceDependency<T,I>::enable() {
             }
             this->stateChangedCallback();
         };
-        this->tracker.push_back(this->ctx->trackServices(opts));
+        newTracker.emplace_back(ctx->trackServices(opts));
+        std::lock_guard<std::mutex> lck{mutex};
+        std::swap(tracker, newTracker);
+
+    } else if (!enable and currentlyEnabled) {
+        //disable
+        std::lock_guard<std::mutex> lck{mutex};
+        std::swap(tracker, newTracker/*empty*/);
     }
+
+    //newTracker out of scope -> RAII -> for disable clear current tracker, for enable empty newTracker
+}
+
+template<typename T, typename I>
+celix::ServiceDependency<T,I>& celix::ServiceDependency<T,I>::enable() {
+    setEnabled(true);
     return *this;
 }
 
 template<typename T, typename I>
 celix::ServiceDependency<T,I>& celix::ServiceDependency<T,I>::disable() {
-    std::lock_guard<std::mutex> lck{mutex};
-    tracker.clear();
+    setEnabled(false);
     return *this;
 }
 
@@ -346,6 +397,12 @@ template<typename T, typename I>
 celix::ServiceDependency<T,I>& celix::ServiceDependency<T,I>::setCardinality(celix::Cardinality c) {
     std::lock_guard<std::mutex> lck{mutex};
     cardinality = c;
+    return *this;
+}
+
+template<typename T, typename I>
+celix::ServiceDependency<T,I>& celix::ServiceDependency<T,I>::extractUUID(std::string& out) {
+    out = uuid;
     return *this;
 }
 
