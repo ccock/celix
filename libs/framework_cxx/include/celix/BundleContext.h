@@ -39,8 +39,8 @@ namespace celix {
         std::shared_ptr<celix::IBundle> bundle() const;
 
         template<typename I>
-        celix::ServiceRegistration registerService(I &svc, celix::Properties props = {}) {
-            return registry().registerService<I>(svc, std::move(props), bundle());
+        celix::ServiceRegistration registerService(I &&svc, celix::Properties props = {}) {
+            return registry().registerService<I>(std::forward<I>(svc), std::move(props), bundle());
         }
 
         template<typename I>

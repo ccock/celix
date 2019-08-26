@@ -89,6 +89,13 @@ namespace celix {
         std::function<void(std::vector<std::tuple<std::shared_ptr<I>, const celix::Properties*, const celix::IResourceBundle *>> rankedServices)> updateWithOwner{};
 
         //TODO lock free update calls atomics, rcu, hazard pointers ??
+
+
+        /**
+         * pre and post update hooks, can be used if a trigger is needed before or after an service update.
+         */
+        std::function<void()> preServiceUpdateHook{};
+        std::function<void()> postServiceUpdateHook{};
     };
 
     //RAII service tracker: out of scope -> stop tracker
@@ -130,11 +137,7 @@ namespace celix {
         const std::string& name() const;
 
         template<typename I>
-        celix::ServiceRegistration registerService(I &svc, celix::Properties props = {}, std::shared_ptr<const celix::IResourceBundle> owner = {}) {
-            auto svcName = celix::serviceName<I>();
-            auto voidSvc = std::shared_ptr<void>(static_cast<void*>(&svc), [](void*){/*nop*/}); //transform to std::shared_ptr to minimize the underlining impl needed.
-            return registerService(svcName, std::move(voidSvc), std::move(props), std::move(owner));
-        }
+        celix::ServiceRegistration registerService(I &&svc, celix::Properties props = {}, std::shared_ptr<const celix::IResourceBundle> owner = {});
 
         template<typename I>
         celix::ServiceRegistration registerService(std::shared_ptr<I> svc, celix::Properties props = {}, std::shared_ptr<const celix::IResourceBundle> owner = {}) {
@@ -400,6 +403,9 @@ namespace celix {
 }
 
 
+std::ostream& operator<<(std::ostream &out, const celix::ServiceRegistration& serviceRegistration);
+
+
 template<typename F>
 inline celix::ServiceRegistration celix::ServiceRegistry::registerFunctionService(const std::string &functionName, F&& func, celix::Properties props, std::shared_ptr<const celix::IResourceBundle> owner) {
     class FunctionServiceFactory : public celix::IServiceFactory<void> {
@@ -498,11 +504,11 @@ inline celix::ServiceTracker celix::ServiceRegistry::trackServices(std::string s
     ServiceTrackerOptions<void> opts{};
     opts.filter = std::move(options.filter);
 
-    if (options.set != nullptr) {
-        auto set = std::move(options.set);
-        opts.set = [set](std::shared_ptr<void> svc){
+    if (options.setWithOwner != nullptr) {
+        auto set = std::move(options.setWithOwner);
+        opts.setWithOwner = [set](std::shared_ptr<void> svc, const celix::Properties &props, const celix::IResourceBundle &owner){
             auto typedSvc = std::static_pointer_cast<I>(svc);
-            set(typedSvc);
+            set(typedSvc, props, owner);
         };
     }
     if (options.setWithProperties != nullptr) {
@@ -512,19 +518,19 @@ inline celix::ServiceTracker celix::ServiceRegistry::trackServices(std::string s
             set(typedSvc, props);
         };
     }
-    if (options.setWithOwner != nullptr) {
-        auto set = std::move(options.setWithOwner);
-        opts.setWithOwner = [set](std::shared_ptr<void> svc, const celix::Properties &props, const celix::IResourceBundle &owner){
+    if (options.set != nullptr) {
+        auto set = std::move(options.set);
+        opts.set = [set](std::shared_ptr<void> svc){
             auto typedSvc = std::static_pointer_cast<I>(svc);
-            set(typedSvc, props, owner);
+            set(typedSvc);
         };
     }
 
-    if (options.add != nullptr) {
-        auto add = std::move(options.add);
-        opts.add = [add](std::shared_ptr<void> svc) {
+    if (options.addWithOwner != nullptr) {
+        auto add = std::move(options.addWithOwner);
+        opts.addWithOwner = [add](std::shared_ptr<void> svc, const celix::Properties &props, const celix::IResourceBundle &bnd) {
             auto typedSvc = std::static_pointer_cast<I>(svc);
-            add(typedSvc);
+            add(typedSvc, props, bnd);
         };
     }
     if (options.addWithProperties != nullptr) {
@@ -534,19 +540,19 @@ inline celix::ServiceTracker celix::ServiceRegistry::trackServices(std::string s
             add(typedSvc, props);
         };
     }
-    if (options.addWithOwner != nullptr) {
-        auto add = std::move(options.addWithOwner);
-        opts.addWithOwner = [add](std::shared_ptr<void> svc, const celix::Properties &props, const celix::IResourceBundle &bnd) {
+    if (options.add != nullptr) {
+        auto add = std::move(options.add);
+        opts.add = [add](std::shared_ptr<void> svc) {
             auto typedSvc = std::static_pointer_cast<I>(svc);
-            add(typedSvc, props, bnd);
+            add(typedSvc);
         };
     }
 
-    if (options.remove != nullptr) {
-        auto rem = std::move(options.remove);
-        opts.remove = [rem](std::shared_ptr<void> svc) {
+    if (options.removeWithOwner != nullptr) {
+        auto rem = std::move(options.removeWithOwner);
+        opts.removeWithOwner = [rem](std::shared_ptr<void> svc, const celix::Properties &props, const celix::IResourceBundle &bnd) {
             auto typedSvc = std::static_pointer_cast<I>(svc);
-            rem(typedSvc);
+            rem(typedSvc, props, bnd);
         };
     }
     if (options.removeWithProperties != nullptr) {
@@ -556,22 +562,22 @@ inline celix::ServiceTracker celix::ServiceRegistry::trackServices(std::string s
             rem(typedSvc, props);
         };
     }
-    if (options.removeWithOwner != nullptr) {
-        auto rem = std::move(options.removeWithOwner);
-        opts.removeWithOwner = [rem](std::shared_ptr<void> svc, const celix::Properties &props, const celix::IResourceBundle &bnd) {
+    if (options.remove != nullptr) {
+        auto rem = std::move(options.remove);
+        opts.remove = [rem](std::shared_ptr<void> svc) {
             auto typedSvc = std::static_pointer_cast<I>(svc);
-            rem(typedSvc, props, bnd);
+            rem(typedSvc);
         };
     }
 
-    if (options.update != nullptr) {
-        auto update = std::move(options.update);
-        opts.update = [update](std::vector<std::shared_ptr<void>> rankedServices) {
-            std::vector<std::shared_ptr<I>> typedServices{};
+    if (options.updateWithOwner != nullptr) {
+        auto update = std::move(options.updateWithOwner);
+        opts.updateWithOwner = [update](std::vector<std::tuple<std::shared_ptr<void>, const celix::Properties *, const celix::IResourceBundle*>> rankedServices) {
+            std::vector<std::tuple<std::shared_ptr<I>, const celix::Properties*, const celix::IResourceBundle*>> typedServices{};
             typedServices.reserve(rankedServices.size());
-            for (auto &svc : rankedServices) {
-                auto typedSvc = std::static_pointer_cast<I>(svc);
-                typedServices.push_back(typedSvc);
+            for (auto &tuple : rankedServices) {
+                auto typedSvc = std::static_pointer_cast<I>(std::get<0>(tuple));
+                typedServices.push_back(std::make_tuple(typedSvc, std::get<1>(tuple), std::get<2>(tuple)));
             }
             update(std::move(typedServices));
         };
@@ -588,17 +594,24 @@ inline celix::ServiceTracker celix::ServiceRegistry::trackServices(std::string s
             update(std::move(typedServices));
         };
     }
-    if (options.updateWithOwner != nullptr) {
-        auto update = std::move(options.updateWithOwner);
-        opts.updateWithOwner = [update](std::vector<std::tuple<std::shared_ptr<void>, const celix::Properties *, const celix::IResourceBundle*>> rankedServices) {
-            std::vector<std::tuple<std::shared_ptr<I>, const celix::Properties*, const celix::IResourceBundle*>> typedServices{};
+    if (options.update != nullptr) {
+        auto update = std::move(options.update);
+        opts.update = [update](std::vector<std::shared_ptr<void>> rankedServices) {
+            std::vector<std::shared_ptr<I>> typedServices{};
             typedServices.reserve(rankedServices.size());
-            for (auto &tuple : rankedServices) {
-                auto typedSvc = std::static_pointer_cast<I>(std::get<0>(tuple));
-                typedServices.push_back(std::make_tuple(typedSvc, std::get<1>(tuple), std::get<2>(tuple)));
+            for (auto &svc : rankedServices) {
+                auto typedSvc = std::static_pointer_cast<I>(svc);
+                typedServices.push_back(typedSvc);
             }
             update(std::move(typedServices));
         };
+    }
+
+    if (options.preServiceUpdateHook) {
+        opts.preServiceUpdateHook = std::move(options.preServiceUpdateHook);
+    }
+    if (options.postServiceUpdateHook) {
+        opts.postServiceUpdateHook = std::move(options.postServiceUpdateHook);
     }
 
     return trackAnyServices(std::move(svcName), std::move(opts), std::move(requester));

@@ -28,6 +28,8 @@
 
 #include <glog/logging.h>
 #include <assert.h>
+#include <celix/ServiceRegistry.h>
+
 
 #include "celix/Constants.h"
 #include "celix/ServiceRegistry.h"
@@ -196,9 +198,15 @@ namespace {
             }
 
             //call callbacks
+            if (opts.preServiceUpdateHook) {
+                opts.preServiceUpdateHook();
+            }
             callSetCallbacks();
             callAddRemoveCallbacks(entry, svc, true);
             callUpdateCallbacks();
+            if (opts.postServiceUpdateHook) {
+                opts.postServiceUpdateHook();
+            }
         }
 
         void remMatch(const std::shared_ptr<const SvcEntry> &entry) {
@@ -211,26 +219,32 @@ namespace {
             }
 
             //call callbacks
+            if (opts.preServiceUpdateHook) {
+                opts.preServiceUpdateHook();
+            }
             callSetCallbacks(); //note also removed highest if that was set to this svc
             callAddRemoveCallbacks(entry, svc, false);
             callUpdateCallbacks();
-
+            if (opts.postServiceUpdateHook) {
+                opts.postServiceUpdateHook();
+            }
 
             //note sync will be done on the SvcEntry usage, which is controlled by the tracker svc shared ptr
         }
 
-        void callAddRemoveCallbacks(const std::shared_ptr<const SvcEntry> &entry, std::shared_ptr<void> &svc, bool add) {
-            auto &update = add ? opts.add : opts.remove;
-            auto &updateWithProps = add ? opts.addWithProperties : opts.removeWithProperties;
-            auto &updateWithOwner = add ? opts.addWithOwner : opts.removeWithOwner;
-            if (update) {
-                update(svc);
+        void callAddRemoveCallbacks(const std::shared_ptr<const SvcEntry>& entry, std::shared_ptr<void>& svc, bool add) {
+            auto& update = add ? opts.add : opts.remove;
+            auto& updateWithProps = add ? opts.addWithProperties : opts.removeWithProperties;
+            auto& updateWithOwner = add ? opts.addWithOwner : opts.removeWithOwner;
+            //The more explicit callbacks are called first (i.e first WithOwner)
+            if (updateWithOwner) {
+                updateWithOwner(svc, entry->props, *entry->owner);
             }
             if (updateWithProps) {
                 updateWithProps(svc, entry->props);
             }
-            if (updateWithOwner) {
-                updateWithOwner(svc, entry->props, *entry->owner);
+            if (update) {
+                update(svc);
             }
         }
 
@@ -254,14 +268,19 @@ namespace {
             //TODO race condition. highest can be updated because lock is released.
 
             if (highestUpdated) {
-                if (opts.set) {
-                    opts.set(currentHighestSvc); //note can be nullptr
+                static celix::Properties emptyProps{};
+                static EmptyBundle emptyOwner{};
+                //The more explicit callbacks are called first (i.e first WithOwner)
+                if (opts.setWithOwner) {
+                    opts.setWithOwner(currentHighestSvc,
+                                      currentHighestSvc == nullptr ? emptyProps : currentHighestSvcEntry->props,
+                                      currentHighestSvc == nullptr ? emptyOwner : *currentHighestSvcEntry->owner);
                 }
                 if (opts.setWithProperties) {
-                    opts.setWithProperties(currentHighestSvc, currentHighestSvcEntry->props);
+                    opts.setWithProperties(currentHighestSvc, currentHighestSvc == nullptr ? emptyProps : currentHighestSvcEntry->props);
                 }
-                if (opts.setWithOwner) {
-                    opts.setWithOwner(currentHighestSvc, currentHighestSvcEntry->props, *currentHighestSvcEntry->owner);
+                if (opts.set) {
+                    opts.set(currentHighestSvc); //note can be nullptr
                 }
             }
         }
@@ -276,12 +295,9 @@ namespace {
                     rankedServices.push_back(std::make_tuple(entry.second, &entry.first->props, entry.first->owner.get()));
                 }
             }
-            if (opts.update) {
-                std::vector<std::shared_ptr<void>> rnk{};
-                for (auto &tuple : rankedServices) {
-                    rnk.push_back(std::get<0>(tuple));
-                }
-                opts.update(std::move(rnk));
+            //The more explicit callbacks are called first (i.e first WithOwner)
+            if (opts.updateWithOwner) {
+                opts.updateWithOwner(rankedServices);
             }
             if (opts.updateWithProperties) {
                 std::vector<std::tuple<std::shared_ptr<void>, const celix::Properties*>> rnk{};
@@ -290,8 +306,12 @@ namespace {
                 }
                 opts.updateWithProperties(std::move(rnk));
             }
-            if (opts.updateWithOwner) {
-                opts.updateWithOwner(std::move(rankedServices));
+            if (opts.update) {
+                std::vector<std::shared_ptr<void>> rnk{};
+                for (auto &tuple : rankedServices) {
+                    rnk.push_back(std::get<0>(tuple));
+                }
+                opts.update(std::move(rnk));
             }
         }
 
@@ -353,7 +373,7 @@ public:
 
 class celix::ServiceRegistry::Impl {
 public:
-    Impl(std::string _regName) : regName{_regName} {}
+    Impl(std::string _regName) : regName{std::move(_regName)} {}
 
     const std::shared_ptr<const celix::IResourceBundle> emptyBundle = std::shared_ptr<const celix::IResourceBundle>{new EmptyBundle{}};
     const std::string regName;
@@ -403,9 +423,9 @@ public:
         props[celix::SERVICE_BUNDLE] = std::to_string(bnd->id());
 
         if (factory) {
-            VLOG(1) << "Registering service factory '" << svcName << "' from bundle id " << owner->id() << std::endl;
+            DLOG(INFO) << "Registering service factory '" << svcName << "' from bundle id " << owner->id() << std::endl;
         } else {
-            VLOG(1) << "Registering service '" << svcName << "' from bundle id " << owner->id() << std::endl;
+            DLOG(INFO) << "Registering service '" << svcName << "' from bundle id " << owner->id() << std::endl;
         }
 
         const auto it = services.registry[svcName].emplace(new SvcEntry{std::move(bnd), svcId, svcName, std::move(svc), std::move(factory), std::move(props)});
@@ -430,6 +450,7 @@ public:
                 .unregisterCallback = std::move(unreg),
                 .registered = true
         };
+
         return celix::ServiceRegistration{impl};
     }
 
@@ -524,7 +545,7 @@ public:
 
 
 /**********************************************************************************************************************
-  Service Registry
+  Service Registry Implementation
  **********************************************************************************************************************/
 
 
@@ -538,11 +559,6 @@ celix::ServiceRegistry::~ServiceRegistry() {
 }
 
 const std::string& celix::ServiceRegistry::name() const { return pimpl->regName; }
-
-/*
-celix::ServiceRegistration celix::ServiceRegistry::registerService(const std::string &svcName, std::unique_ptr<void> svc, celix::Properties props, std::shared_ptr<const celix::IResourceBundle> owner) {
-    return pimpl->registerService(std::move(svcName), nullptr, {}, std::move(svc), std::move(props), std::move(owner));
-}*/
 
 celix::ServiceRegistration celix::ServiceRegistry::registerService(std::string svcName, std::shared_ptr<void> svc, celix::Properties props, std::shared_ptr<const celix::IResourceBundle> owner) {
     return pimpl->registerService(std::move(svcName), std::move(svc), {}, std::move(props), std::move(owner));
@@ -728,8 +744,17 @@ std::vector<std::string> celix::ServiceRegistry::listAllRegisteredServiceNames()
     return pimpl->listAllRegisteredServiceNames();
 }
 
+template<typename I>
+celix::ServiceRegistration celix::ServiceRegistry::registerService(I &&svc, celix::Properties props, std::shared_ptr<const celix::IResourceBundle> owner) {
+    auto svcName = celix::serviceName<I>();
+    auto *servicesStore = new std::vector<I>{};
+    servicesStore->emplace_back(std::forward<I>(svc));
+    auto voidSvc = std::shared_ptr<void>(static_cast<void*>(&(*servicesStore)[0]), [servicesStore](void*){delete servicesStore;}); //transform to std::shared_ptr to minimize the underlining impl needed.
+    return registerService(svcName, std::move(voidSvc), std::move(props), std::move(owner));
+}
+
 /**********************************************************************************************************************
-  Service Registration
+  Service Registration Implementation
  **********************************************************************************************************************/
 
 celix::ServiceRegistration::ServiceRegistration() : pimpl{nullptr} {}
@@ -748,6 +773,7 @@ void celix::ServiceRegistration::unregister() {
     if (pimpl && pimpl->registered) {
         pimpl->registered = false; //TODO make thread safe
         pimpl->unregisterCallback();
+        DLOG(INFO) << "Unregister " << *this;
     }
 }
 
@@ -764,11 +790,16 @@ const std::string& celix::ServiceRegistration::serviceName() const {
     return empty;
 }
 
+std::ostream& operator<<(std::ostream &out, const celix::ServiceRegistration& reg) {
+    out << "ServiceRegistration[service_id=" << reg.serviceId() << ",service_name=" << reg.serviceName() << "]";
+    return out;
+}
+
 
 
 
 /**********************************************************************************************************************
-  Service Tracker
+  Service Tracker Implementation
  **********************************************************************************************************************/
 
 celix::ServiceTracker::ServiceTracker() : pimpl{nullptr} {}

@@ -38,10 +38,18 @@ static std::string genUUID() {
 
 celix::GenericServiceDependency::GenericServiceDependency(
         std::shared_ptr<celix::BundleContext> _ctx,
-        std::function<void()> _stateChangedCallback) :
+        std::string _svcName,
+        std::function<void()> _stateChangedCallback,
+        std::function<void()> _suspendCallback,
+        std::function<void()> _resumeCallback,
+        bool _isValid) :
             ctx{std::move(_ctx)},
+            svcName{std::move(_svcName)},
             stateChangedCallback{std::move(_stateChangedCallback)},
-            uuid{genUUID()} {}
+            suspenseCallback{std::move(_suspendCallback)},
+            resumeCallback{std::move(_resumeCallback)},
+            uuid{genUUID()},
+            valid{_isValid} {}
 
 
 bool celix::GenericServiceDependency::isResolved() const {
@@ -58,7 +66,7 @@ celix::Cardinality celix::GenericServiceDependency::getCardinality() const {
     return cardinality;
 }
 
-bool celix::GenericServiceDependency::getRequired() const {
+bool celix::GenericServiceDependency::isRequired() const {
     std::lock_guard<std::mutex> lck{mutex};
     return required;
 }
@@ -68,16 +76,42 @@ const std::string &celix::GenericServiceDependency::getFilter() const {
     return filter;
 }
 
-std::string celix::GenericServiceDependency::getUUD() {
+const std::string& celix::GenericServiceDependency::getUUD() const {
     return uuid;
 }
 
-bool celix::GenericServiceDependency::isEnabled() {
+bool celix::GenericServiceDependency::isEnabled() const {
     std::lock_guard<std::mutex> lck{mutex};
     return !tracker.empty();
 }
 
-celix::ComponentState celix::GenericComponentManager::getState() const {
+celix::UpdateServiceStrategy celix::GenericServiceDependency::getStrategy() const {
+    std::lock_guard<std::mutex> lck{mutex};
+    return strategy;
+}
+
+const std::string &celix::GenericServiceDependency::getSvcName() const {
+    return svcName;
+}
+
+bool celix::GenericServiceDependency::isValid() const {
+    return valid;
+}
+
+void celix::GenericServiceDependency::preServiceUpdate() {
+    if (getStrategy() == UpdateServiceStrategy::Suspense) {
+        suspenseCallback(); //note resume will be done in the updateServices (last called)
+    }
+}
+
+void celix::GenericServiceDependency::postServiceUpdate() {
+    if (getStrategy() == UpdateServiceStrategy::Suspense) {
+        resumeCallback(); //note suspend call is done in the setService (first called)
+    }
+    this->stateChangedCallback();
+}
+
+celix::ComponentManagerState celix::GenericComponentManager:: getState() const {
     std::lock_guard<std::mutex> lck{stateMutex};
     return state;
 }
@@ -88,9 +122,12 @@ bool celix::GenericComponentManager::isEnabled() const  {
 }
 
 bool celix::GenericComponentManager::isResolved() const {
+    if (!isEnabled()) {
+        return false; //not enabled is not resolved!
+    }
     std::lock_guard<std::mutex> lck{stateMutex};
     for (auto &pair : serviceDependencies) {
-        if (!pair.second->isResolved()) {
+        if (pair.second->isEnabled() && !pair.second->isResolved()) {
             return false;
         }
     }
@@ -98,32 +135,47 @@ bool celix::GenericComponentManager::isResolved() const {
 }
 
 void celix::GenericComponentManager::setEnabled(bool e) {
-    {
-        std::lock_guard<std::mutex> lck{stateMutex};
-        enabled = e;
-    }
     std::vector<std::shared_ptr<GenericServiceDependency>> deps{};
+    std::vector<std::shared_ptr<GenericProvidedService>> provides{};
     {
         std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
         for (auto &pair : serviceDependencies) {
             deps.push_back(pair.second);
         }
     }
-
+    {
+        std::lock_guard<std::mutex> lck{providedServicesMutex};
+        for (auto &pair : providedServices) {
+            provides.push_back(pair.second);
+        }
+    }
     //NOTE updating outside of the lock
-    for (auto &dep : deps) {
+    for (auto& dep : deps) {
         dep->setEnabled(e);
     }
+    for (auto& provide : provides) {
+        provide->setEnabled(e);
+    }
+
+
+    {
+        std::lock_guard<std::mutex> lck{stateMutex};
+        enabled = e;
+    }
+
     updateState();
 }
 
 void celix::GenericComponentManager::updateState() {
-    bool allDependenciesResolved = true;
+    bool allRequiredDependenciesResolved = true; /*all required and enabled dependencies resolved? */
     {
         std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
         for (auto &pair : serviceDependencies) {
-            if (!pair.second->isResolved()) {
-                allDependenciesResolved = false;
+            auto enabled = pair.second->isEnabled();
+            auto required = pair.second->isRequired();
+            auto resolved = pair.second->isResolved();
+            if (enabled && required && !resolved) {
+                allRequiredDependenciesResolved = false;
                 break;
             }
         }
@@ -131,13 +183,13 @@ void celix::GenericComponentManager::updateState() {
 
     {
         std::lock_guard<std::mutex> lck{stateMutex};
-        ComponentState currentState = state;
-        ComponentState targetState = ComponentState::Disabled;
+        ComponentManagerState currentState = state;
+        ComponentManagerState targetState = ComponentManagerState::Disabled;
 
-        if (enabled && allDependenciesResolved) {
-            targetState = ComponentState::Started;
-        } else if (enabled) /*not all dep resolved*/ {
-            targetState = initialized ? ComponentState::Initialized : ComponentState::Uninitialized;
+        if (enabled && allRequiredDependenciesResolved) {
+            targetState = ComponentManagerState::ComponentStarted;
+        } else if (enabled) /*not all required dep resolved*/ {
+            targetState = initialized ? ComponentManagerState::ComponentInitialized : ComponentManagerState::ComponentUninitialized;
         }
 
         if (currentState != targetState) {
@@ -148,8 +200,8 @@ void celix::GenericComponentManager::updateState() {
 }
 
 void celix::GenericComponentManager::transition() {
-    ComponentState currentState;
-    ComponentState targetState;
+    ComponentManagerState currentState;
+    ComponentManagerState targetState;
 
     {
         std::lock_guard<std::mutex> lck{stateMutex};
@@ -162,94 +214,69 @@ void celix::GenericComponentManager::transition() {
         targetState = pair.second;
     }
 
-    DLOG(INFO) << "Transition for " << name << " from " << currentState << " to " << targetState;
+    DLOG(INFO) << "Transition " << *this << " from " << currentState << " to " << targetState;
 
-    //TODO note callbacks are called outside of mutex. make local copies or ensure that callback can only be changed with disabled component managers ...
-
-    if (targetState == ComponentState::Disabled) {
-        switch (currentState) {
-            case celix::ComponentState::Disabled:
+    if (currentState == ComponentManagerState::Disabled) {
+        switch (targetState) {
+            case celix::ComponentManagerState::Disabled:
                 //nop
                 break;
-            case celix::ComponentState::Uninitialized:
-                //TODO may disable callback to cmp
-                setState(ComponentState::Disabled);
-                break;
-            case celix::ComponentState::Initialized:;
-                deinit();
-                setInitialized(false);
-                setState(ComponentState::Uninitialized);
-                break;
-            case celix::ComponentState::Started:
-                stop();
-                setState(ComponentState::Initialized);
+            default:
+                setState(ComponentManagerState::ComponentUninitialized);
                 break;
         }
-    } else if (targetState == ComponentState::Uninitialized) {
-        switch (currentState) {
-            case celix::ComponentState::Disabled:
-                //TODO maybe enable callback
-                setState(ComponentState::Uninitialized);
+    } else if (currentState == ComponentManagerState::ComponentUninitialized) {
+        switch (targetState) {
+            case celix::ComponentManagerState::Disabled:
+                setState(ComponentManagerState::Disabled);
                 break;
-            case celix::ComponentState::Uninitialized:
+            case celix::ComponentManagerState::ComponentUninitialized:
                 //nop
                 break;
-            case celix::ComponentState::Initialized:
-                deinit();
-                setInitialized(false);
-                setState(ComponentState::Uninitialized);
-                break;
-            case celix::ComponentState::Started:
-                stop();
-                setState(ComponentState::Initialized);
-                break;
-        }
-    } else if (targetState == ComponentState::Initialized) {
-        switch (currentState) {
-            case celix::ComponentState::Disabled:
-                //TODO maybe enabled callback
-                setState(ComponentState::Uninitialized);
-                break;
-            case celix::ComponentState::Uninitialized:
-                init();
+            default: //targetState initialized of started
+                initCmp();
                 setInitialized(true);
-                setState(ComponentState::Initialized);
-                break;
-            case celix::ComponentState::Initialized:
-                //nop
-                break;
-            case celix::ComponentState::Started:
-                stop();
-                setState(ComponentState ::Initialized);
+                setState(ComponentManagerState::ComponentInitialized);
                 break;
         }
-    } else if (targetState == ComponentState::Started) {
-        switch (currentState) {
-            case celix::ComponentState::Disabled:
-                //TODO maybe enabled callback
-                setState(ComponentState::Uninitialized);
+    } else if (currentState == ComponentManagerState::ComponentInitialized) {
+        switch (targetState) {
+            case celix::ComponentManagerState::Disabled:
+                deinitCmp();
+                setInitialized(false);
+                setState(ComponentManagerState::ComponentUninitialized);
                 break;
-            case celix::ComponentState::Uninitialized:
-                init();
-                setInitialized(true);
-                setState(ComponentState::Initialized);
+            case celix::ComponentManagerState::ComponentUninitialized:
+                deinitCmp();
+                setInitialized(false);
+                setState(ComponentManagerState::ComponentUninitialized);
                 break;
-            case celix::ComponentState::Initialized:
-                start();
-                setState(ComponentState::Started);
-                break;
-            case celix::ComponentState::Started:
+            case celix::ComponentManagerState::ComponentInitialized:
                 //nop
                 break;
+            case celix::ComponentManagerState::ComponentStarted:
+                startCmp();
+                setState(ComponentManagerState ::ComponentStarted);
+                updateServiceRegistrations();
+                break;
         }
-    } else {
-        LOG(ERROR) << "Unexpected target state: " << targetState;
+    } else if (currentState == ComponentManagerState::ComponentStarted) {
+        switch (targetState) {
+            case celix::ComponentManagerState::ComponentStarted:
+                //nop
+                break;
+            default:
+                stopCmp();
+                setState(ComponentManagerState::ComponentInitialized);
+                updateServiceRegistrations(); //TODO before stop?
+                break;
+        }
     }
 
     updateState();
 }
 
-void celix::GenericComponentManager::setState(ComponentState s) {
+void celix::GenericComponentManager::setState(ComponentManagerState s) {
     std::lock_guard<std::mutex> lck{stateMutex};
     state = s;
 }
@@ -263,13 +290,41 @@ celix::GenericComponentManager::GenericComponentManager(std::shared_ptr<celix::B
 }
 
 void celix::GenericComponentManager::removeServiceDependency(const std::string& serviceDependencyUUID) {
-    std::lock_guard<std::mutex> lck{stateMutex};
-    auto it = serviceDependencies.find(serviceDependencyUUID);
-    if (it != serviceDependencies.end()) {
-        serviceDependencies.erase(it);
-    } else {
-        LOG(WARNING) << "Cannot find service dependency with uuid " << serviceDependencyUUID << " in component manager " << name << " with uuid " << uuid << ".";
+    std::shared_ptr<GenericServiceDependency> removed{};
+    {
+        std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
+        auto it = serviceDependencies.find(serviceDependencyUUID);
+        if (it != serviceDependencies.end()) {
+            removed = it->second;
+            serviceDependencies.erase(it);
+        } else {
+            LOG(WARNING) << "Cannot find service dependency with uuid " << serviceDependencyUUID
+                         << " in component manager " << name << " with uuid " << uuid << ".";
+        }
     }
+    if (removed) {
+        removed->setEnabled(false);
+    }
+    //NOTE removed out of scope -> RAII will cleanup
+}
+
+void celix::GenericComponentManager::removeProvideService(const std::string& provideServiceUUID) {
+    std::shared_ptr<GenericProvidedService> removed{};
+    {
+        std::lock_guard<std::mutex> lck{providedServicesMutex};
+        auto it = providedServices.find(provideServiceUUID);
+        if (it != providedServices.end()) {
+            removed = it->second;
+            providedServices.erase(it);
+        } else {
+            LOG(WARNING) << "Cannot find provided service with uuid " << provideServiceUUID
+                         << " in component manager " << name << " with uuid " << uuid << ".";
+        }
+    }
+    if (removed) {
+        removed->setEnabled(false);
+    }
+    //NOTE removed out of scope -> RAII will cleanup
 }
 
 std::string celix::GenericComponentManager::getName() const {
@@ -281,23 +336,195 @@ void celix::GenericComponentManager::setInitialized(bool i) {
     initialized = i;
 }
 
+std::shared_ptr<celix::GenericServiceDependency>
+celix::GenericComponentManager::findGenericServiceDependency(const std::string &svcName,
+                                                             const std::string &svcDepUUID) {
+    std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
+    auto it = serviceDependencies.find(svcDepUUID);
+    if (it != serviceDependencies.end()) {
+        if (it->second->getSvcName() == svcName) {
+            return it->second;
+        } else {
+            LOG(WARNING) << "Requested svc name has svc name " << it->second->getSvcName() <<  " instead of the requested " << svcName;
+            return nullptr;
+        }
+    } else {
+        LOG(WARNING) << "Cmp Manager (" << uuid << ") does not have a service dependency with uuid " << svcDepUUID << "; returning an invalid GenericServiceDependency";
+        return nullptr;
+    }
+}
 
-std::ostream& operator<< (std::ostream& out, celix::ComponentState state)
+std::size_t celix::GenericComponentManager::getSuspendedCount() const {
+    std::lock_guard<std::mutex> lck{stateMutex};
+    return suspendedCount;
+}
+
+void celix::GenericComponentManager::suspense() {
+    bool changedSuspended = false;
+    {
+        std::lock_guard<std::mutex> lck{stateMutex};
+        if (!suspended) {
+            suspended = true;
+            changedSuspended = true;
+        }
+    }
+    if (changedSuspended) {
+        transition();
+        std::lock_guard<std::mutex> lck{stateMutex};
+        suspendedCount += 1;
+        DLOG(INFO) << "Suspended " << *this;
+    }
+}
+
+void celix::GenericComponentManager::resume() {
+    bool changedSuspended = false;
+    {
+        std::lock_guard<std::mutex> lck{stateMutex};
+        if (suspended) {
+            suspended = false;
+            changedSuspended = true;
+        }
+    }
+    if (changedSuspended) {
+        transition();
+        DLOG(INFO) << "Resumed " << *this;
+    }
+}
+
+void celix::GenericComponentManager::updateServiceRegistrations() {
+    std::vector<std::shared_ptr<GenericProvidedService>> toRegisterServices{};
+    std::vector<std::shared_ptr<GenericProvidedService>> toUnregisterServices{};
+    if (getState() == ComponentManagerState::ComponentStarted) {
+        std::lock_guard<std::mutex> lck{providedServicesMutex};
+        for (auto &pair : providedServices) {
+            auto enabled = pair.second->isEnabled();
+            auto registered = pair.second->isServiceRegistered();
+            if (enabled && !registered) {
+                toRegisterServices.push_back(pair.second);
+            } else if (registered && !enabled) {
+                toUnregisterServices.push_back(pair.second);
+            }
+        }
+    } else {
+        std::lock_guard<std::mutex> lck{providedServicesMutex};
+        for (auto &pair : providedServices) {
+            auto registered = pair.second->isServiceRegistered();
+            if (registered) {
+                toUnregisterServices.push_back(pair.second);
+            }
+        }
+    }
+
+    //note (un)registering service outside of mutex
+    for (auto& provide : toRegisterServices) {
+        provide->registerService();
+    }
+    for (auto& provide : toUnregisterServices) {
+        provide->unregisterService();
+    }
+}
+
+std::shared_ptr<celix::GenericProvidedService>
+celix::GenericComponentManager::findGenericProvidedService(const std::string &svcName,
+                                                           const std::string &providedServiceUUID) {
+    std::lock_guard<std::mutex> lck{providedServicesMutex};
+    auto it = providedServices.find(providedServiceUUID);
+    if (it != providedServices.end()) {
+        if (it->second->getServiceName() == svcName) {
+            return it->second;
+        } else {
+            LOG(WARNING) << "Requested svc name has svc name " << it->second->getServiceName() <<  " instead of the requested " << svcName;
+            return nullptr;
+        }
+    } else {
+        LOG(WARNING) << "Cmp Manager (" << uuid << ") does not have a provided service with uuid " << providedServiceUUID << "; returning an invalid GenericProvidedService";
+        return nullptr;
+    }
+}
+
+std::size_t celix::GenericComponentManager::nrOfServiceDependencies() {
+    std::lock_guard<std::mutex> lck{serviceDependenciesMutex};
+    return serviceDependencies.size();
+}
+
+std::size_t celix::GenericComponentManager::nrOfProvidedServices() {
+    std::lock_guard<std::mutex> lck{providedServicesMutex};
+    return providedServices.size();
+}
+
+std::ostream& operator<< (std::ostream& out, const celix::GenericComponentManager& mng) {
+    out << "ComponentManager[name=" << mng.getName() << ", uuid=" << mng.getUUD() << "]";
+    return out;
+}
+
+
+std::ostream& operator<< (std::ostream& out, celix::ComponentManagerState state)
 {
     switch (state) {
-        case celix::ComponentState::Disabled:
+        case celix::ComponentManagerState::Disabled:
             out << "Disabled";
             break;
-        case celix::ComponentState::Uninitialized:
-            out << "Uninitialized";
+        case celix::ComponentManagerState::ComponentUninitialized:
+            out << "ComponentUninitialized";
             break;
-        case celix::ComponentState::Initialized:
-            out << "Initialized";
+        case celix::ComponentManagerState::ComponentInitialized:
+            out << "ComponentInitialized";
             break;
-        case celix::ComponentState::Started:
-            out << "Started";
+        case celix::ComponentManagerState::ComponentStarted:
+            out << "ComponentStarted";
             break;
     }
     return out;
 }
 
+bool celix::GenericProvidedService::isEnabled() const {
+    std::lock_guard<std::mutex> lck{mutex};
+    return enabled;
+}
+
+const std::string &celix::GenericProvidedService::getUUID() const {
+    return uuid;
+}
+
+const std::string &celix::GenericProvidedService::getServiceName() const {
+    return svcName;
+}
+
+bool celix::GenericProvidedService::isValid() const {
+    return valid;
+}
+
+celix::GenericProvidedService::GenericProvidedService(
+        std::shared_ptr<celix::BundleContext> _ctx,
+        std::string _svcName,
+        std::function<void()> _updateServiceRegistrationsCallback,
+        bool _valid) :
+    ctx{std::move(_ctx)},
+    uuid{genUUID()},
+    svcName{std::move(_svcName)},
+    updateServiceRegistrationsCallback{std::move(_updateServiceRegistrationsCallback)},
+    valid{_valid} {
+
+}
+
+void celix::GenericProvidedService::setEnabled(bool e) {
+    {
+        std::lock_guard<std::mutex> lck{mutex};
+        enabled = e;
+    }
+    updateServiceRegistrationsCallback();
+}
+
+void celix::GenericProvidedService::unregisterService() {
+    std::vector<ServiceRegistration> unregister{};
+    {
+        std::lock_guard<std::mutex> lck{mutex};
+        std::swap(registration, unregister);
+    }
+    //NOTE RAII will ensure unregister
+}
+
+bool celix::GenericProvidedService::isServiceRegistered() {
+    std::lock_guard<std::mutex> lck{mutex};
+    return registration.size() > 0;
+}

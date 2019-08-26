@@ -26,7 +26,7 @@ namespace celix {
     public:
         Impl(std::shared_ptr<celix::IBundle> _bnd) :
             bnd{std::move(_bnd)},
-            reg{&bnd->framework().registry(celix::C_AND_CXX_LANG_REG)} {}
+            reg{&bnd->framework().registry("main")} {}
 
         Impl(const Impl&) = delete;
         Impl& operator=(const Impl&) = delete;
